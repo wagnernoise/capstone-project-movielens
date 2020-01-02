@@ -1,0 +1,348 @@
+---
+title: "MovieLens 10M Project"
+author: "Wagner Rosa"
+output:
+  pdf_document: default
+  html_document: default
+---
+#Overview
+In this project, we will analyse the [Movie Lens](https://grouplens.org//) data set that, in our case, will be consisted by a 10 million movie ratings and a 100,000 tag applications applied to 10,000 movies by 72,000 users. This orignal set was released in January 2009 and it serves as a stable benchmark for the development of recommendation systems.
+The goal of this project is to propose a recommendation model with the lowest root mean square error (RMSE) possible, which can be translated as a "good recommendation system". For this puporse, we will taking the following steps:
+- Perform an exploratory data analysis (EDA) of the data set
+- Propose and test classification models
+- Report the best model with RMSE
+
+Now, let's create our data sets.
+
+#Create test and validation sets
+In order to perform our analyses, we need to download the data either by using this [link](https://grouplens.org/datasets/movielens/10m/) or by running the following code (provided by EDX).
+
+```{r data set download}
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+After running the code above, we will have the 10M data set downloaded and, also, a validation set will be generated to be used in the future modeling. 
+
+#EDA
+##Dimensions and properties
+Here, we are going to look if the data set is correctly downloaded and, at the same time, check the dimension of the data. 
+
+```{r dimensions and summary}
+glimpse(edx)
+glimpse(validation)
+```
+
+We can see that we have successfully downloaded our data and we have created 2 data sets: *edx* (for training) and *validation* (for validation). 
+
+##Number of different movies in the dataset
+In this part, we'll check how many unique movies are included in the data set.
+```{r}
+length(unique(edx$movieId))
+```
+##Ratings
+Now, let's look on how the ratings are distributed by making a hystogram of the *edx* data set
+```{r}
+qplot(edx$rating, 
+      geom = "histogram", 
+      xlab = "Rating", 
+      ylab = "Frequency",
+      fill = I("blue"))
+```
+In general, users have a tendency to rate using whole stars rather than half star ratings, being the latest less common (e.g., there are fewer ratings of 3.5 than there are ratings of 3 or 4, etc.).
+
+Looking for the five most given ratings in order from most to least.
+```{r}
+edx %>% group_by(rating) %>%
+  summarise(number = n()) %>%
+  arrange(desc(number)) %>%
+  top_n(5)
+```
+
+##Movie with greatest number of ratings
+Checking which movies have the most number of ratings overall.
+```{r}
+edx %>% group_by(title) %>%
+  select(rating) %>%
+  summarise(number = n()) %>%
+  arrange(desc(number))
+```
+
+Let's see what genres (by rating) are more popular among the users
+```{r}
+movies_by_rating <- edx %>% separate_rows(genres, sep = "\\|") %>% 
+                            group_by(genres) %>%
+                            summarise(number = n()) %>%
+                            arrange(desc(number))
+movies_by_rating
+```
+
+Bar plotting the results above.
+```{r}
+movies_by_rating %>% 
+  mutate(genres = reorder(genres, number)) %>%
+  ggplot(aes(genres, number, fill = genres)) +
+  geom_bar(width = 0.5, stat = "identity") +
+  coord_flip() +
+  theme(legend.key.height = unit(0.8,"line"))
+  
+```
+As we can see, drama movies have the most ratings among all the genres, followed by comedy and action in the second and third place, respectively. Moreover, small percentages of the genres are labeled as "IMAX" and "no genres listed", which definitely is a mistake. Nervertheles, we can neglect such contributions since the total occurrence is very low [8188 in total (~0.035%)].
+
+Word cloud of the results:
+```{r} 
+library(wordcloud)
+movies_by_rating_2 <- edx %>% 
+  separate_rows(genres, sep = "\\|") %>% 
+  group_by(genres) %>% 
+  summarize(Ratings_perGenre_Sum = n(), 
+            Ratings_perGenre_Mean = mean(rating), 
+            Movies_perGenre_Sum = n_distinct(movieId), 
+            Users_perGenre_Sum = n_distinct(userId))
+
+wordcloud(words = movies_by_rating_2$genres, freq = movies_by_rating_2$Ratings_perGenre_Sum, 
+    min.freq = 10, max.words = 10, random.order = FALSE, random.color = FALSE, 
+    rot.per = 0.35, scale = c(5, 0.2), font = 4, colors = brewer.pal(8, "Dark2"), 
+    main = "Most rated genres")
+
+
+percentage.mistake.genres <- (8188/sum(movies_by_rating$number))*100
+cat("Percentage of contributions that are misclassified:", percentage.mistake.genres, "%")
+```
+##Movies per year
+Now, let's jus see how the number of movies (per genre) has evolved over the years.
+```{r}
+#library(lubridate)
+movies_year <- edx %>%
+  extract(title, c("title", "year"), regex = "^(.*) \\(([0-9 \\-]*)\\)$", remove = F)
+
+movies_per_year <- movies_year %>%
+  select(movieId, year) %>% # select columns we need
+  group_by(year) %>% # group by year
+  summarise(count = n())  %>% # count movies per year
+  arrange(year)
+
+head(movies_per_year,10)
+
+movies_per_year_df <- as.data.frame(movies_per_year)
+  
+movies_per_year_df %>%
+  ggplot(aes(x = as.numeric(year), y = count)) +
+  geom_line(color="blue") +
+  xlab("Year") +
+  ylab("Movies per year")
+```
+```{r}
+movies_per_year$year[which.max(movies_per_year$count)]
+```
+Here we see that the year of 1995 was the peak for movie productions.
+
+#Classification models
+## Model 1: Average rating
+In this first model, we will assume that the predictions are equal to the mean rating values and just below the mean. With these simple assumptions, let's evaluate the root mean squared errors (RMSE) for both approaches.
+```{r}
+#Splitting the edx dataset into train and test
+split_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2, list = FALSE)
+edx_train <- edx[-split_index,]
+edx_test <- edx[split_index,]
+
+# Root mean squared error
+RMSE <- function(true_ratings, predicted_ratings){
+     sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+### Building the Recommendation System
+
+mu_hat <- mean(edx_train$rating)
+mu_hat
+
+#Prediction using meand rating value
+naive_rmse <- RMSE(edx_test$rating, mu_hat)
+naive_rmse
+
+#Prediction using only values of 2.5 as rating
+predictions <- rep(2.5, nrow(edx_test))
+less_than_mean <- RMSE(edx_test$rating, predictions)
+
+#Table of RMSE results
+rmse_results <- tibble(method = c("Just the average", "Lower than average (2.5)"), RMSE = c(naive_rmse, less_than_mean))
+rmse_results
+```
+As we can note, both approaches are quite inefficient and performs really poorly. However, they will be used to compare the other approaches, therefore we expect that the further solutions should perform better than random guesses.
+
+## Model 2: Item-based and user-based collabirative systems
+In one case, we are going to create an Item-Item matrix (ignoring the user), focusing on what items from all the options are more similar to what we know the user enjoys. On the other case, a User-Item Matrix will be created, which will predict the ratings on items the active user has not see, based on the other similar users.
+```{r}
+#Getting the mean ratings value
+mu <- mean(edx$rating) 
+
+movie_avgs <- edx %>% 
+     group_by(movieId) %>% 
+     summarize(b_i = mean(rating - mu))
+
+predicted_ratings_movies <- mu + validation %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     .$b_i
+
+model_1_rmse <- RMSE(validation$rating, predicted_ratings_movies)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie Effect Model",
+                                     RMSE = model_1_rmse ))
+#rmse_results %>% knitr::kable()
+
+user_avgs <- edx %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     group_by(userId) %>%
+     summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings_movies_users <- validation %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     left_join(user_avgs, by='userId') %>%
+     mutate(pred = mu + b_i + b_u) %>%
+     .$pred
+
+model_2_rmse <- RMSE(validation$rating, predicted_ratings_movies_users)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + User Effects Model",  
+                                     RMSE = model_2_rmse ))
+#rmse_results %>% knitr::kable()
+rmse_results
+```
+As we can observe, both models perform better than simple guesses of the first ones. The model where we take into account both item and user matrix has the minimum RMSE value, meaning that this model is a better reccomendation engine so far.
+
+## Model 3: Regularization 
+Regularization is a technique to cope with over-fitting which comes up in training a model on sample data. With the regularization we are able to smooth out the noise, wich can lead to larger errors. In this case, we are going to consider both item and user-based regularization to see if we can perform better the models used before. 
+```{r}
+mu <- mean(edx$rating)
+lambdas <- seq(0, 10, 0.25)
+
+just_the_sum <- edx %>% 
+     group_by(movieId) %>% 
+     summarize(s = sum(rating - mu), n_i = n())
+
+rmses_movies <- sapply(lambdas, function(l){
+     predicted_ratings_reg1 <- validation %>%
+          left_join(just_the_sum, by='movieId') %>%
+          mutate(b_i = s/(n_i+l)) %>%
+          mutate(pred = mu + b_i) %>%
+          .$pred
+     return(RMSE(validation$rating, predicted_ratings_reg1))
+})
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Regularized Movie Effect Model",  
+                                     RMSE = min(rmses_movies)))
+lambdas <- seq(0, 10, 0.25)
+rmses_movies_user <- sapply(lambdas, function(l){
+     mu <- mean(edx$rating)
+     b_i <- edx %>% 
+          group_by(movieId) %>%
+          summarize(b_i = sum(rating - mu)/(n()+l))
+     b_u <- edx %>% 
+          left_join(b_i, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+     predicted_ratings_reg2 <- 
+          validation %>% 
+          left_join(b_i, by = "movieId") %>%
+          left_join(b_u, by = "userId") %>%
+          mutate(pred = mu + b_i + b_u) %>%
+          .$pred
+     return(RMSE(validation$rating, predicted_ratings_reg2))
+})
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Regularized Movie + User Effect Model",  
+                                     RMSE = min(rmses_movies_user)))
+
+rmse_results
+```
+Altough the regularization model are strong against noises from the dataset, which supposes to be a better pattern finding algorythm by penalizing larger estimates, it is indeed outperformed by the item-user collaborative model. 
+
+## Model 4: Matrix factorization
+Matrix factorization is a class of collaborative filtering algorithm that works by decomposing the user-item interaction matrix into the product of two lower dimensionality rectangular matrices. For this purpose, we are going to use the recosystem library, which is a implementation of matrix factorization using R as a wrapper of LIBMF, a high-performance C++ library.
+```{r}
+library(recosystem)
+train_data <- data_memory(user_index = edx_train$userId, 
+                          item_index = edx_train$movieId, 
+                          rating = edx_train$rating, 
+                          index1 = T)
+
+test_data <- data_memory(user_index = edx_test$userId, 
+                         item_index = edx_test$movieId, 
+                         rating = edx_test$rating, 
+                         index1 = T)
+rec <- Reco()
+rec$train(train_data, 
+          opts = c(dim = 30, 
+                   costp_l2 = 0.1, 
+                   costq_l2 = 0.1, 
+                   lrate = 0.1, 
+                   niter = 100, 
+                   nthread = 4, 
+                   verbose = F)
+          ) 
+
+predictions_mf <- rec$predict(test_data, out_memory())
+
+model_mf_rmse <- RMSE(edx_test$rating, predictions_mf)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Matrix factorizartion Model",  
+                                     RMSE = model_mf_rmse
+                                     )
+                          )
+# Arraging in descending order
+rmse_results %>% arrange(desc(RMSE))
+```
+The RMSE values for the matrix factorization shows that this model outperforms every other one proved so far. This model has proven to be very powerful and, in this scenario, is the best algorythm to be used as a recommendation engine.
+
+# Conclusions
+To sum up, after exploring, visualizing and modelling the  10 million movie ratings dataset, we were able to determine the preferred genres, the best rated movies and, also, to create an algorythm to be used as a recommendation engine. In this aspect, the matrix factorization model is the best one, which give us a RMSE of approximately 0.81.
+
+
