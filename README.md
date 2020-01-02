@@ -1,2 +1,2 @@
-# capstone-project-movielens
-Capstone project for the HarvardX Data Science 
+MovieLens Capstone Project
+Capstone project for the HarvardX Data Science degree
